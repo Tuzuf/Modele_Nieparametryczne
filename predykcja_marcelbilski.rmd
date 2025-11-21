@@ -1,0 +1,538 @@
+
+---
+title: "Modele nieparametryczne - Marcel Bilski"
+author: "Marcel Bilski"
+output:
+  html_document:
+    toc: true
+    toc-location: left
+  word_document:
+    toc: true
+  pdf_document:
+    toc: true
+knitr:
+  opts_chunk:
+    tidy: true
+    tidy.opts:
+      width.cutoff: 60
+    message: false
+    warning: false
+---
+
+## Pakiety
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+install.packages("randomForest", repos = "http://cran.us.r-project.org")
+library(randomForest)
+install.packages("rpart", repos = "http://cran.us.r-project.org")
+library(rpart)
+install.packages("xgboost", repos = "http://cran.us.r-project.org")
+library(xgboost)
+install.packages("caret", repos = "http://cran.us.r-project.org")
+library(caret)
+install.packages("lubridate", repos = "http://cran.us.r-project.org")
+library(lubridate)
+install.packages("summarytools", repos = "http://cran.us.r-project.org")
+library(summarytools)
+install.packages("ggplot2", repos = "http://cran.us.r-project.org")
+library(ggplot2)
+install.packages("rpart.plot", repos = "http://cran.us.r-project.org")
+library(rpart.plot)
+install.packages("dplyr", repos = "http://cran.us.r-project.org")
+library(dplyr)
+```
+
+
+
+## ZADANIE 1 -  Wstępna analiza
+
+```{r}
+load("dane_zaliczenie.RData")
+summary(proba_uczaca)
+sum(is.na(proba_uczaca))
+sapply(proba_uczaca, function(x) sum(is.na(x)))
+
+```
+
+
+## Usunięcie kolumn
+Usunięcie niepotrzebnych kolumn.
+
+```{r}
+proba_uczaca <- proba_uczaca %>% select(-screenwidth, -screenheight, -payclickedtime, -browseragent, -description)
+summary(proba_uczaca)
+```
+
+
+## Weryfikacja powiązania
+NA występuje dla transakcji inicjalizyjących. Możliwa jest zatem imputacja jako 'completed successfully'.
+Możemy zweryfikować czy braki danych w zmiennych status i initialtransaction_id są powiązane z zmienną recurringaction.
+```{r}
+# Tworzenie pomocniczej tabeli i filtrowanie braków danych w 'initialtransaction_id'
+help_table1 <- proba_uczaca %>%
+  select(status, initialtransaction_id, recurringaction) %>%
+  filter(is.na(initialtransaction_id))
+
+# Podsumowanie informacji
+summary(help_table1)
+
+# Sprawdzanie liczby braków w poszczególnych zmiennych
+sum_na_initialtransaction_id <- sum(is.na(help_table1$initialtransaction_id))
+sum_na_status <- sum(is.na(help_table1$status))
+
+# Wyświetlenie unikalnych transakcji z brakami danych
+unique_transactions_with_na <- unique(help_table1)
+
+# Uzupełnianie braków danych w 'status' w 'proba_uczaca'
+proba_uczaca <- proba_uczaca %>%
+  mutate(status = as.character(status)) %>%
+  mutate(status = ifelse(is.na(status), "completed successfully", status))
+
+# Sprawdzenie unikalnych wartości po uzupełnieniu braków
+unique(proba_uczaca$status)
+
+# Liczenie pozostałych braków w 'status'
+sum_na_status_after <- sum(is.na(proba_uczaca$status))
+
+# Konwersja 'status' na faktor
+proba_uczaca$status <- as.factor(proba_uczaca$status)
+levels(proba_uczaca$status)
+```
+
+
+## Dalsza weryfikacja
+Sprawdzamy czy inne zmienne z wartością NA mają jakieś powiązania. 
+W tym celu tworzy dwie nowe tabele pomocnicze.
+```{r}
+help_table2 <- proba_uczaca[,c('status', 'mccname', 'listtype', 'initialtransaction_id', 'recurringaction')]
+help_table3 <- filter(help_table2, is.na(help_table2$initialtransaction_id))
+summary(help_table3)
+
+help_table2$recurringaction <- as.factor(help_table2$recurringaction)
+
+sum(is.na(help_table2$mccname))
+sum(is.na(help_table2$listtype))
+sum(is.na(help_table2$initialtransaction_id))
+
+```
+
+Jeżeli zmienne mają wartoścu NA to oznacza, że są one sukcesem.
+Po zbadaniu zmiennej description, która posiada informacje na temat tytułu płatności, możemy dojść do wniosku że nie ma różnicy dla statusu transakcji pomiędzy brakiem tytułu a wartością NA. Jednak braki danych częściej pojawiaja się w transakcjach typu AUTO niż puste opisy transakcji. 
+
+
+
+## Ogarniczenie zbioru do transakcji AUTO
+```{r}
+proba_uczaca <- proba_uczaca %>% filter(proba_uczaca$recurringaction == 'AUTO')
+
+unique(proba_uczaca$recurringaction)
+
+#wyczyszczenie kolumny
+proba_uczaca <- proba_uczaca %>% select(-recurringaction)
+```
+
+## Analiza zmiennej createtime na kolumnę z dniami tygodnia
+
+```{r}
+proba_uczaca$weekday <-  as.factor(weekdays(as.Date(proba_uczaca$createtime)))
+proba_uczaca <- proba_uczaca %>%
+  mutate(weekday = weekdays(as.Date(createtime)),
+         hour = as.numeric(format(as.POSIXct(createtime), "%H")))
+
+proba_uczaca <- proba_uczaca %>% select(-createtime)
+```
+
+
+
+##Test korelacji chi-kwadrat
+
+```{r}
+for(c in colnames(proba_uczaca)){
+  
+  if (class(proba_uczaca[[c]]) == 'character'){
+    proba_uczaca[[c]] <- as.factor(proba_uczaca[[c]])
+    print(c)
+  }
+    else {
+      print(class(proba_uczaca[[c]]))
+    }
+}
+
+
+summary(proba_uczaca$level)
+summary(proba_uczaca$countrycode)
+
+```
+
+## Korelacja chi-kwadrat dla zmiennych jakościowych
+Wartość p-value w tescie chi-kwadrat pozwoli sprawdzić istotność zmiennych.
+```{r warning=FALSE}
+# Funkcja do przeprowadzenia testu chi-kwadrat dla grupy zmiennych kategorycznych
+chi_square_test <- function(data, target_var) {
+  results <- data.frame(Variable = character(),
+                        Chi_Square = numeric(),
+                        P_Value = numeric(),
+                        Degrees_of_Freedom = integer(),
+                        stringsAsFactors = FALSE)
+  
+  for (col in colnames(data)) {
+    if (col != target_var && is.factor(data[[col]])) {
+      # Tworzenie tabeli kontyngencji
+      contingency_table <- table(data[[target_var]], data[[col]])
+      
+      # Test chi-kwadrat
+      test <- chisq.test(contingency_table)
+      
+      # Zbieranie wyników
+      results <- rbind(results, data.frame(Variable = col,
+                                           Chi_Square = test$statistic,
+                                           P_Value = test$p.value,
+                                           Degrees_of_Freedom = test$parameter))
+    }
+  }
+  return(results)
+}
+
+# Wyniki testu chi-kwadrat
+chi_square_results <- chi_square_test(proba_uczaca, "status")
+print(chi_square_results)
+
+# Histogram z nowymi kolorami
+ggplot(chi_square_results, aes(x = Variable, y = P_Value, fill = Variable)) +
+  geom_bar(stat = "identity") +
+  scale_y_log10() +  # Skala logarytmiczna dla p-wartości
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  labs(title = "P-wartości testu Chi-kwadrat dla zmiennych", x = "Zmienna", y = "P-wartość (log10 skala)") +
+  scale_fill_manual(values = c("yellow", "orange", "green", "purple", "red", "grey", "cyan", "darkgreen"))
+
+```
+
+## Sprawdzenie istotności ilościowych
+
+```{r}
+
+library(randomForest)
+model_rf <- randomForest(status ~ ., data = proba_uczaca)
+print(model_rf)
+importance(model_rf)
+
+```
+Wnioski:
+
+
+# Tworzenie modelu testowego
+Powtarzamy to co zrobiliśmy na próbie uczącej tylko na próbie testowej.
+
+```{r}
+proba_testowa <- proba_testowa %>% filter(proba_testowa$recurringaction == 'AUTO')
+proba_testowa <- proba_testowa %>% select(-screenwidth, -screenheight, -payclickedtime, -browseragent, -description, -recurringaction, -level, -countrycode)
+
+
+proba_testowa$weekday <-  as.factor(weekdays(as.Date(proba_testowa$createtime)))
+proba_testowa <- proba_testowa %>%
+  mutate(weekday = weekdays(as.Date(createtime)),
+         hour = as.numeric(format(as.POSIXct(createtime), "%H")))
+
+
+sum(is.na(proba_testowa))
+for (col in colnames(proba_testowa)){
+   print(col)
+   print(sum(is.na(proba_testowa[[col]])))
+} 
+
+proba_testowa <- proba_testowa %>% select(-createtime, -amount)
+
+#zmieniamy na factor
+for(c in colnames(proba_testowa)){
+  
+  if (class(proba_testowa[[c]]) == 'character'){
+    proba_testowa[[c]] <- as.factor(proba_testowa[[c]])
+    print(c)
+  }
+    else {
+      print(class(proba_testowa[[c]]))
+    }
+}
+
+```
+
+## Przypisanie kolumny status do kolumny new_status
+Dzięki temu będzie możliwe zdecydować czy transakcja zakończyła się sukcesem czy nie.
+```{r}
+length(unique(proba_uczaca$mccname))
+table(proba_uczaca$mccname)
+nlevels(proba_uczaca$mccname)
+```
+
+# Przeniesienie nie potrzbenej wartości
+Wartość "sklepy kosmetyczne pojawia się tylko raz, więc ją przenosimy, żeby nie stwarzała problemów.
+
+```{r}
+proba_uczaca$mccname[proba_uczaca$mccname == "Sklepy kosmetyczne"] <- "Usługi biznesowe gdzie indziej nie sklasyfikowane"
+
+proba_uczaca$mccname <- as.character(proba_uczaca$mccname)
+proba_uczaca$mccname <- as.factor(proba_uczaca$mccname)
+
+proba_uczaca <- proba_uczaca %>%
+  mutate(status = case_when(
+    status == "completed successfully" ~ 1,   
+    TRUE ~ 0                               
+  ))
+
+proba_uczaca$status <- ifelse(proba_uczaca$status == 1, "sukces", "porażka")
+proba_uczaca$status <- as.factor(proba_uczaca$status)
+```
+
+
+## Tworzenie dwóch podzbiorów z proby uczacej
+Tworzymy grupę_uczącą oraz grupę_walidacyjną.
+```{r}
+set.seed(120)
+
+#usuniecie  kolumn level, countrycode, i amount z danych próby uczącej
+test1 <- proba_uczaca %>% select(-level, -countrycode, -amount )
+grupy <- rep(c("uczacy", "walidacyjny" ), round(c(0.7, 0.3)*nrow(proba_uczaca)))
+grupy <- sample(grupy)
+
+grupa_uczaca <- test1[grupy == 'uczacy',]
+grupa_walidacyjna <- test1[grupy == 'walidacyjny',]
+```
+
+
+
+## Sprawdzenie i poprawa wartości faktorowanych
+```{r}
+# Sprawdzenie dla zmiennych typu 'factor'
+factor_columns <- names(grupa_uczaca)[sapply(grupa_uczaca, is.factor)]  # Znalezienie zmiennych faktorowych w zbiorze 'grupa_uczaca'
+
+# Dla każdej zmiennej faktorowej sprawdzimy, czy poziomy są takie same w obu zbiorach
+for (col in factor_columns) {
+  cat("\nSprawdzanie poziomów dla zmiennej:", col, "\n")
+  
+  # Sprawdzenie, czy poziomy w obu zbiorach są takie same
+  levels_grupa <- levels(grupa_uczaca[[col]])
+  levels_test <- levels(proba_testowa[[col]])
+  
+  if (identical(levels_grupa, levels_test)) {
+    cat("Poziomy są identyczne w obu zbiorach.\n")
+  } else {
+    cat("Poziomy są różne!\n")
+    cat("Poziomy w 'grupa_uczaca':", paste(levels_grupa, collapse = ", "), "\n")
+    cat("Poziomy w 'proba_testowa':", paste(levels_test, collapse = ", "), "\n")
+  }
+}
+
+# Dopasowanie poziomów zmiennej 'factor' w zbiorze testowym do poziomów w zbiorze treningowym
+# grupa.uczacy$mccname <- factor(proba_testowa$mccname, levels = levels(grupa.uczacy$mccname ))
+
+```
+
+
+
+
+## Random Forest
+```{r}
+model <- randomForest(status ~ ., data = grupa_uczaca)
+test_predictions <- predict(model, newdata = grupa_walidacyjna)
+train_predictions <- predict(model, newdata = grupa_uczaca)
+head(test_predictions)
+confusionMatrix(train_predictions, grupa_uczaca$status)
+confusionMatrix(test_predictions, grupa_walidacyjna$status)
+
+print(model)
+varImpPlot(model)
+
+```
+Model jest w stanie poprawnie sklasyfikować dane w około 89,11% przypadków.
+
+Model dobrze radzi sobie z klasyfikacją klasy “sukces” (bardzo niski błąd klasyfikacji: 2,63%), ale ma trudności z poprawnym przewidywaniem klasy “porażka” (błąd klasyfikacji: 43,82%). Model dobrze nadaje się do zadań, w których klasa “sukces” jest ważniejsza niż “porażka”.
+```{r}
+predictions <- predict(model, newdata = proba_testowa)
+
+# Tworzenie ramki danych z wynikami predykcji
+results_df <- data.frame(id = proba_testowa$id, prediction = predictions)
+
+# Wyświetlenie pierwszych 10 wierszy wyników
+head(results_df, 10)
+
+# Scalanie wyników predykcji z ramką danych testowych
+predykcje_testowa <- merge(predykcje_testowa, results_df, by = "id", all.x = TRUE)
+
+# Konwersja kolumny z predykcjami na czynnik
+predykcje_testowa$status <- as.factor(predykcje_testowa$prediction)
+
+# Usunięcie kolumny z surowymi predykcjami
+predykcje_testowa$prediction <- NULL
+
+# Wyświetlenie pierwszych 10 wierszy przetworzonej ramki danych
+head(predykcje_testowa, 10)
+```
+
+# #ZADANIE 2 - WSTĘPNA EKSPLORACJA DANYCH
+
+```{r}
+summary(proba_uczaca)
+sum(is.na(proba_uczaca))
+sapply(proba_uczaca, function(x) sum(is.na(x)))
+```
+
+#BUDOWANIE MODELI
+
+```{r}
+# Usuwanie ekstremów
+
+# Podsumowanie i obliczenie odchylenia standardowego dla kolumny 'amount'
+summary(proba_uczaca$amount)
+odchylenie_standardowe <- sd(proba_uczaca$amount, na.rm = TRUE)
+
+# Wyświetlenie obliczonego odchylenia standardowego
+print(odchylenie_standardowe)
+
+# Oczyszczanie danych z wartości powyżej 180
+proba_uczaca <- proba_uczaca %>% filter(amount < 180)
+
+
+```
+
+
+```{r}
+
+drzewo_regresji <- rpart(amount ~ ., data = proba_uczaca, method = "anova")
+
+# Zastosowanie funkcji 'tapply' do sumowania 'amount' w poszczególnych węzłach drzewa
+suma_w_wezlach <- tapply(proba_uczaca$amount, INDEX = drzewo_regresji$where, FUN = sum)
+
+# Sprawdzanie wyników
+print(suma_w_wezlach)
+
+```
+
+```{r}
+węzły <- drzewo_regresji$where
+
+```
+
+
+
+## Tworzenie dwóch podzbiorów z proby uczacej
+Tworzymy grupę_uczącą2 oraz grupę_walidacyjną2.
+```{r}
+set.seed(120)
+
+#Kod usuwa kolumny level, countrycode z ramki danych proba_uczaca.
+test2 <- proba_uczaca %>% select(-level, -countrycode, -status)
+
+grupy2 <- rep(c("uczacy", "walidacyjny" ), round(c(0.7, 0.3)*nrow(proba_uczaca)))
+
+grupy2 <- sample(grupy2)
+
+grupa_uczaca2 <- test2[grupy2 == 'uczacy',]
+grupa_walidacyjna2 <- test2[grupy2 == 'walidacyjny',]
+
+
+
+```
+
+
+# Sprawdzanie poziomów
+```{R}
+# Zidentyfikowanie kolumn faktorowych w zbiorze danych
+factor_columns_check <- names(grupa_uczaca2)[sapply(grupa_uczaca2, is.factor)]
+
+# Weryfikacja poziomów zmiennych faktorowych
+for (column in factor_columns_check) {
+  cat("\nSprawdzanie poziomów dla zmiennej:", column, "\n")
+  
+  # Pobieranie poziomów zmiennych z obu zbiorów (treningowego i testowego)
+  levels_train <- levels(grupa_uczaca2[[column]])
+  levels_test <- levels(proba_testowa[[column]])
+  
+  if (identical(levels_train, levels_test)) {
+    cat("Poziomy są identyczne w obu zbiorach.\n")
+  } else {
+    cat("Poziomy są różne\n")
+    cat("Poziomy w 'grupa_uczaca2':", paste(levels_train, collapse = ", "), "\n")
+    cat("Poziomy w 'proba_testowa':", paste(levels_test, collapse = ", "), "\n")
+  }
+}
+```
+# Drzewo regresyjne właściwe
+```{r}
+# Budowanie drzewa regresyjnego z kontrolą nad parametrami
+drzewo_regresji <- rpart(amount ~ ., data = grupa_uczaca2, method = "anova", control = rpart.control(cp = 0.01), model = TRUE)
+
+# Wizualizacja drzewa
+rpart.plot(drzewo_regresji, branch.type = 1)
+
+# Predykcje dla zbioru walidacyjnego
+predykcje_testowe <- predict(drzewo_regresji, newdata = grupa_walidacyjna2)
+
+# Predykcje dla zbioru uczącego
+predykcje_uczace <- predict(drzewo_regresji, newdata = grupa_uczaca2)
+
+# Wyświetlenie wyników predykcji dla danych walidacyjnych
+head(predykcje_testowe)
+
+
+```
+
+
+# Test jakości 
+```{r}
+# Obliczenie błędów dla zbiorów treningowego i testowego
+train_residuals <- grupa_uczaca2$amount - predykcje_uczace
+test_residuals <- grupa_walidacyjna2$amount - predykcje_testowe
+# MSE: średni błąd kwadratowy
+mse_train_new <- mean(train_residuals^2)
+mse_test_new <- mean(test_residuals^2)
+# MAE: średni błąd absolutny
+mae_train_new <- mean(abs(train_residuals))
+mae_test_new <- mean(abs(test_residuals))
+# R²: współczynnik determinacji
+total_train_variance <- sum((grupa_uczaca2$amount - mean(grupa_uczaca2$amount))^2)
+total_test_variance <- sum((grupa_walidacyjna2$amount - mean(grupa_walidacyjna2$amount))^2)
+r2_train_new <- 1 - (sum(train_residuals^2) / total_train_variance)
+r2_test_new <- 1 - (sum(test_residuals^2) / total_test_variance)
+# Wyświetlenie wyników
+cat("MSE dla zbioru treningowego:", mse_train_new, "MSE dla zbioru testowego:", mse_test_new, "\n")
+cat("MAE dla zbioru treningowego:", mae_train_new, "MAE dla zbioru testowego:", mae_test_new, "\n")
+cat("R² dla zbioru treningowego:", r2_train_new, "R² dla zbioru testowego:", r2_test_new, "\n")
+
+```
+
+
+#Predykcja
+```{R}
+
+# Dokonywanie predykcji na zestawie testowym
+predictions_test <- predict(drzewo_regresji, newdata = proba_testowa)
+
+# Tworzenie ramki danych z wynikami
+results_test <- data.frame(id = proba_testowa$id, prediction_value = predictions_test)
+
+# Wyświetlenie pierwszych 20 wyników
+head(results_test, 20)
+
+# Łączenie nowych wyników z istniejącymi predykcjami
+predykcje_testowa <- merge(predykcje_testowa, results_test, by = "id", all.x = TRUE)
+
+# Konwertowanie kolumny 'prediction_value' na wartości numeryczne
+predykcje_testowa$amount <- as.numeric(predykcje_testowa$prediction_value)
+
+# Usunięcie kolumny 'prediction_value'
+predykcje_testowa$prediction_value <- NULL
+
+# Wyświetlenie pierwszych 40 wyników po zmianach
+head(predykcje_testowa, 40)
+
+```
+
+```{r}
+save(predykcje_testowa, file = "predykcje_testowe.RData")
+````
+
